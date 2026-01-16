@@ -139,8 +139,3 @@ GET /metrics
 
 当某个频道的EPG数据API返回异常数据时，系统会临时屏蔽该频道的请求，
 返回默认节目（"精彩节目"）直到次日。
-
-## 依赖库
-
-- `github.com/enetx/g`: 通用工具库
-- `github.com/enetx/surf`: HTTP客户端库，支持浏览器指纹模拟
