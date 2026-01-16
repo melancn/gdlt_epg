@@ -14,9 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/enetx/g"
-	"github.com/enetx/surf"
 )
 
 // Config 应用配置
@@ -126,7 +123,6 @@ const (
 
 var app *AppContext
 var globalHTTPClient *http.Client
-var globalSurfBrowser *surf.Client
 
 func main() {
 	// 创建应用上下文
@@ -645,24 +641,18 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 
 	log.Printf("未找到频道 %s 在日期 %s 的数据，正在向EPG数据API请求: %s", ch, date, apiURL)
 
-	// 使用 surf 库发起请求
-	if globalSurfBrowser == nil {
-		globalSurfBrowser = surf.NewClient().Builder().Impersonate().Chrome().Build()
+	resp, err := globalHTTPClient.Get(apiURL)
+	if err != nil {
+		return []EPGData{}, fmt.Errorf("请求EPG数据API失败: %w", err)
 	}
-
-	resp := globalSurfBrowser.Get(g.String(apiURL)).Do()
-	if resp.Err() != nil {
-		return []EPGData{}, resp.Err()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []EPGData{}, fmt.Errorf("读取EPG数据API响应失败: %w", err)
 	}
-	if resp.Ok().StatusCode != http.StatusOK {
-		resp.Ok().Debug().Request().Print()
-		resp.Ok().Debug().Response().Print()
-		return []EPGData{}, fmt.Errorf("EPG数据API返回非200状态码 %d", resp.Ok().StatusCode)
-	}
-
 	var apiResponse APIResponse
-	if err := resp.Ok().Body.JSON(&apiResponse); err != nil {
-		return []EPGData{}, err
+	if err := json.Unmarshal(body, &apiResponse); err != nil {
+		return []EPGData{}, fmt.Errorf("解析EPG数据API响应失败: %w", err)
 	}
 	if apiResponse.EPGData[0].Title == "精彩节目" {
 		// 当EPG数据API返回的数据不符合预期格式时，标记该ch在当天不再请求EPG数据API
