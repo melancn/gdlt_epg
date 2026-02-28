@@ -18,10 +18,11 @@ import (
 
 // Config 应用配置
 type Config struct {
-	ChannelMapURL string `json:"channel_map_url"`
-	EPGDataURL    string `json:"epg_data_url"`
-	Port          string `json:"port"`
-	AliasFile     string `json:"alias_file"`
+	ChannelMapURL  string `json:"channel_map_url"`
+	EPGDataURL     string `json:"epg_data_url"`
+	Port           string `json:"port"`
+	AliasFile      string `json:"alias_file"`
+	ChannelMapFile string `json:"channel_map_file"`
 }
 
 // ChannelMap 频道映射结构
@@ -65,14 +66,15 @@ type EPGData struct {
 
 // MetricsResponse 指标响应结构
 type MetricsResponse struct {
-	CacheEntries     int    `json:"cache_entries"`
-	ChannelMappings  int    `json:"channel_mappings"`
-	AliasMappings    int    `json:"alias_mappings"`
-	ActiveLocks      int    `json:"active_locks"`
-	ChannelBlackouts int    `json:"channel_blackouts"`
-	CacheDuration    string `json:"cache_duration"`
-	MaxCacheSize     int    `json:"max_cache_size"`
-	MaxChannelLocks  int    `json:"max_channel_locks"`
+	CacheEntries     int              `json:"cache_entries"`
+	ChannelMappings  int              `json:"channel_mappings"`
+	AliasMappings    int              `json:"alias_mappings"`
+	ActiveLocks      int              `json:"active_locks"`
+	ChannelBlackouts int              `json:"channel_blackouts"`
+	ChannelBlack     ChannelBlackouts `json:"channel_black"`
+	CacheDuration    string           `json:"cache_duration"`
+	MaxCacheSize     int              `json:"max_cache_size"`
+	MaxChannelLocks  int              `json:"max_channel_locks"`
 
 	// HTTP客户端指标
 	HTTPClientInitialized  bool   `json:"http_client_initialized"`
@@ -149,9 +151,15 @@ func main() {
 	// 打印启动参数
 	app.printStartupInfo()
 
+	createHTTPClient()
 	// 获取频道映射
 	if err := app.loadChannelMap(); err != nil {
 		log.Println("获取频道映射失败:", err)
+	}
+
+	// 从文件加载额外的频道映射
+	if err := app.loadChannelMapFile(); err != nil {
+		log.Println("从文件加载频道映射失败:", err)
 	}
 
 	// 加载别名映射
@@ -172,6 +180,7 @@ func (a *AppContext) parseFlags() {
 	epgDataURL := flag.String("epgurl", "https://0777.112114.xyz/", "EPG数据API的URL")
 	port := flag.String("port", "8080", "服务器端口")
 	aliasFile := flag.String("alias", "alias.json", "别名映射文件路径")
+	channelMapFile := flag.String("channelmap", "", "频道映射文件路径")
 	configFile := flag.String("config", "", "配置文件路径")
 
 	flag.Parse()
@@ -188,6 +197,9 @@ func (a *AppContext) parseFlags() {
 	}
 	if a.Config.AliasFile == "" {
 		a.Config.AliasFile = *aliasFile
+	}
+	if a.Config.ChannelMapFile == "" {
+		a.Config.ChannelMapFile = *channelMapFile
 	}
 
 	// 从配置文件加载（如果提供）
@@ -225,6 +237,9 @@ func (a *AppContext) loadConfigFromFile(filename string) error {
 	if config.AliasFile != "" {
 		a.Config.AliasFile = config.AliasFile
 	}
+	if config.ChannelMapFile != "" {
+		a.Config.ChannelMapFile = config.ChannelMapFile
+	}
 
 	return nil
 }
@@ -251,18 +266,18 @@ func (a *AppContext) printStartupInfo() {
 	fmt.Printf("EPG数据API URL: %s\n", a.Config.EPGDataURL)
 	fmt.Printf("服务器端口: %s\n", a.Config.Port)
 	fmt.Printf("别名映射文件: %s\n", a.Config.AliasFile)
+	fmt.Printf("频道映射文件: %s\n", a.Config.ChannelMapFile)
 	fmt.Println("================")
 }
 
 // loadChannelMap 获取频道映射
 func (a *AppContext) loadChannelMap() error {
-	client := createHTTPClient()
 	req, err := createHTTPRequest("GET", a.Config.ChannelMapURL)
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.Do(req)
+	resp, err := globalHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("请求频道映射失败: %w", err)
 	}
@@ -303,6 +318,38 @@ func (a *AppContext) loadChannelMap() error {
 
 	a.ChannelMap = channelMap
 	log.Printf("成功加载 %d 个频道映射", len(channelMap))
+	return nil
+}
+
+// loadChannelMapFile 从文件加载频道映射
+func (a *AppContext) loadChannelMapFile() error {
+	if a.Config.ChannelMapFile == "" {
+		log.Println("频道映射文件路径未设置，跳过加载")
+		return nil
+	}
+
+	data, err := os.ReadFile(a.Config.ChannelMapFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("频道映射文件不存在: %s", a.Config.ChannelMapFile)
+			return nil
+		}
+		return fmt.Errorf("读取频道映射文件失败: %w", err)
+	}
+
+	var channelMapFromFile ChannelMap
+	if err := json.Unmarshal(data, &channelMapFromFile); err != nil {
+		return fmt.Errorf("解析频道映射文件失败: %w", err)
+	}
+
+	// 合并到现有的ChannelMap中
+	for k, v := range channelMapFromFile {
+		if _, exists := a.ChannelMap[k]; !exists {
+			a.ChannelMap[k] = v
+		}
+	}
+
+	log.Printf("成功从文件加载 %d 个频道映射", len(channelMapFromFile))
 	return nil
 }
 
@@ -400,6 +447,7 @@ func handleEPGRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 将频道名转换为全大写并删除"标清"字符串
 	actualCh := strings.ReplaceAll(ch, "标清", "")
+	actualCh = strings.ReplaceAll(ch, "-", "")
 	actualCh = strings.ToUpper(actualCh)
 
 	// 处理别名
@@ -447,20 +495,6 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 	targetDate := strings.ReplaceAll(date, "-", "")
 	cacheKey := fmt.Sprintf("%s_%s", ch, date)
 
-	// 检查频道是否被标记为禁用EPG请求
-	targetDateObj, err := time.Parse("2006-01-02", date)
-	if err != nil {
-		return nil, fmt.Errorf("无效的日期格式: %s", date)
-	}
-	// 检查频道是否被标记为禁用EPG请求（从特定日期开始）
-	if blackout, exists := a.ChannelBlackouts[ch]; exists {
-		// 如果目标日期大于等于禁用开始日期，则返回{"title":"精彩节目","start":"00:00","end":"23:59"}]
-		if targetDateObj.After(blackout) || targetDateObj.Equal(blackout) || blackout.After(time.Date(2099, 1, 1, 1, 1, 1, 1, time.Local)) {
-			log.Printf("频道 %s 在日期 %s 已被标记为禁用EPG请求，跳过API调用", ch, date)
-			return []EPGData{{Title: "精彩节目", Start: "00:00", End: "23:59"}}, nil
-		}
-	}
-
 	// 获取频道专用锁
 	a.MutexMapMutex.Lock()
 	channelMutex, exists := a.ChannelMutexes[ch]
@@ -490,14 +524,32 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 	defer channelMutex.Unlock()
 
 	// 双重检查，防止并发重复请求
+	a.CacheMutex.RLock()
 	if cachedItem, exists := a.Cache[cacheKey]; exists {
+		a.CacheMutex.RUnlock()
 		if time.Since(cachedItem.Timestamp) < CacheDuration {
 			return cachedItem.Data, nil
 		}
+		a.CacheMutex.Lock()
 		delete(a.Cache, cacheKey)
+		a.CacheMutex.Unlock()
+	} else {
+		a.CacheMutex.RUnlock()
 	}
 
-	client := createHTTPClient()
+	// 检查频道是否被标记为禁用EPG请求
+	targetDateObj, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return nil, fmt.Errorf("无效的日期格式: %s", date)
+	}
+	// 检查频道是否被标记为禁用EPG请求（从特定日期开始）
+	if blackout, exists := a.ChannelBlackouts[ch]; exists {
+		// 如果目标日期大于等于禁用开始日期，则返回{"title":"精彩节目","start":"00:00","end":"23:59"}]
+		if targetDateObj.After(blackout) || targetDateObj.Equal(blackout) || blackout.After(time.Date(2099, 1, 1, 1, 1, 1, 1, time.Local)) {
+			log.Printf("频道 %s 在日期 %s 已被标记为禁用EPG请求，跳过API调用", ch, date)
+			return []EPGData{{Title: "精彩节目", Start: "00:00", End: "23:59"}}, nil
+		}
+	}
 
 	// 检查URL是否为空
 	currentTime := time.Now()
@@ -516,7 +568,9 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 		for i := 0; i <= 7; i++ {
 			begintime = begintime.AddDate(0, 0, 1)
 			checkCacheKey := fmt.Sprintf("%s_%s", ch, begintime.Format("2006-01-02"))
+			a.CacheMutex.RLock()
 			item, exists := a.Cache[checkCacheKey]
+			a.CacheMutex.RUnlock()
 			if exists && time.Since(item.Timestamp) < CacheDuration {
 				continue
 			} else {
@@ -536,7 +590,7 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 			return nil, err
 		}
 
-		resp, err := client.Do(req)
+		resp, err := globalHTTPClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -584,6 +638,7 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 				if len(a.Cache) >= MaxCacheSize {
 					// 简单的清理策略：清理过期的缓存
 					now := time.Now()
+					a.CacheMutex.Lock()
 					for key, item := range a.Cache {
 						if now.Sub(item.Timestamp) >= CacheDuration {
 							delete(a.Cache, key)
@@ -603,14 +658,17 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 							delete(a.Cache, oldestKey)
 						}
 					}
+					a.CacheMutex.Unlock()
 				}
 
 				item, exists := a.Cache[dateKey]
 				if !exists || time.Since(item.Timestamp) >= CacheDuration {
+					a.CacheMutex.Lock()
 					a.Cache[dateKey] = CacheItem{
 						Data:      schedules,
 						Timestamp: time.Now(),
 					}
+					a.CacheMutex.Unlock()
 				}
 			}
 		}
@@ -654,19 +712,16 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 	if err := json.Unmarshal(body, &apiResponse); err != nil {
 		return []EPGData{}, fmt.Errorf("解析EPG数据API响应失败: %w", err)
 	}
-	if apiResponse.EPGData[0].Title == "精彩节目" {
-		// 当EPG数据API返回的数据不符合预期格式时，标记该ch在当天不再请求EPG数据API
+	if allTitlesArePlaceholder(apiResponse.EPGData) {
+		// 当EPG数据API返回的所有数据的标题都是"精彩节目"时，标记该ch在当天不再请求EPG数据API
 
 		// 设置为当天的日期，表示跳过请求
 		if targetDateObj.Before(currentTime) {
 			targetDateObj = time.Date(2099, 12, 12, 0, 0, 0, 0, time.Local)
 		}
-		// 获取锁来更新ChannelBlackouts
-		a.MutexMapMutex.Lock()
 		a.ChannelBlackouts[ch] = targetDateObj
-		a.MutexMapMutex.Unlock()
 
-		log.Printf("频道 %s 的EPG数据API返回的数据不符合预期格式，仅在 %s 禁用EPG请求", ch, targetDateObj.Format("2006-01-02"))
+		log.Printf("频道 %s 的EPG数据API返回的数据全是占位符，仅在 %s 禁用EPG请求", ch, targetDateObj.Format("2006-01-02"))
 		// 返回从API获取的实际数据
 		return apiResponse.EPGData, nil
 	}
@@ -676,14 +731,30 @@ func (a *AppContext) getEPGData(ch, iptvurl, date string) ([]EPGData, error) {
 
 	item, exists := a.Cache[dateKey]
 	if !exists || time.Since(item.Timestamp) >= CacheDuration {
+		a.CacheMutex.Lock()
 		a.Cache[dateKey] = CacheItem{
 			Data:      apiResponse.EPGData,
 			Timestamp: time.Now(),
 		}
+		a.CacheMutex.Unlock()
 	}
 
 	log.Printf("从EPG数据API获取到频道 %s 在日期 %s 的 %d 条数据", ch, date, len(apiResponse.EPGData))
 	return apiResponse.EPGData, nil
+}
+
+// allTitlesArePlaceholder 检查所有EPG数据的标题是否都是"精彩节目"
+func allTitlesArePlaceholder(epgData []EPGData) bool {
+	if len(epgData) == 0 {
+		return false
+	}
+
+	for _, data := range epgData {
+		if data.Title != "精彩节目" {
+			return false
+		}
+	}
+	return true
 }
 
 // formatTime 格式化时间
@@ -759,13 +830,13 @@ func (a *AppContext) cleanupChannelLocks() {
 // cleanupChannelBlackouts 清理过期的频道黑名单标记
 func (a *AppContext) cleanupChannelBlackouts() {
 	now := time.Now()
-	// 构造当天0点时间
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	// 构造当天1点时间
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 1, 0, 0, 0, now.Location())
 
 	a.MutexMapMutex.Lock()
 	defer a.MutexMapMutex.Unlock()
 
-	// 清理昨天及更早的标记
+	// 清理当天及更早的标记
 	for ch, blackoutDate := range a.ChannelBlackouts {
 		if blackoutDate.Before(midnight) {
 			delete(a.ChannelBlackouts, ch)
@@ -844,6 +915,7 @@ func (a *AppContext) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		AliasMappings:    len(a.AliasMap),
 		ActiveLocks:      len(a.ChannelMutexes),
 		ChannelBlackouts: len(a.ChannelBlackouts),
+		ChannelBlack:     a.ChannelBlackouts,
 		CacheDuration:    CacheDuration.String(),
 		MaxCacheSize:     MaxCacheSize,
 		MaxChannelLocks:  MaxChannelLocks,
