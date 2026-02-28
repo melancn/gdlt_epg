@@ -1,4 +1,10 @@
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version'
+        required: true
+        default: 'v'
   push:
     # run only against tags
     tags:
