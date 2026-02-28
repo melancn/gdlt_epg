@@ -21,16 +21,16 @@ jobs:
         with:
           fetch-depth: 0
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '>=1.26.0'
+          go-version: stable
           cache: true
       - name: Generate Build Metadata
         run: |
           echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - uses: goreleaser/goreleaser-action@v4
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: release
           version: latest
